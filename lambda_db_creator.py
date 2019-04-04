@@ -1,3 +1,4 @@
+import json
 import logging
 import psycopg2
 
@@ -12,6 +13,9 @@ logger.setLevel(logging.INFO)
 # users [ { username, password, read-only } ]
 
 def lambda_handler(event, context):
+    event = event['body']
+    event = json.loads(event)
+
     logger.info(f"Connecting to postgres server")
     conn = psycopg2.connect(conn_string(event, "postgres"))
     conn.autocommit = True
@@ -36,51 +40,49 @@ def lambda_handler(event, context):
     cursor.close()
     conn.close()
 
+    response = {
+      "statusCode": "200",
+      "headers": {},
+      "body": '{"result": "ok"}'
+    }
+
+    logger.info(f"response: {response}")
+
+    return response
+
 def conn_string(event, db_name):
     return "user=" + event['db_user'] + " password=" + event['db_password'] + " host=" + event['db_host'] + " dbname=" + db_name
 
-def create_user(u, db_name, event, cursor):
+def create_user(u, db_name, event, main_cursor):
     logger.info(f"Connecting to postgres server on db {db_name}")
 
     username = u['username']
     password = u['password']
 
-    cursor.execute(f"SELECT 1 FROM pg_user WHERE usename = %s", [username])
-    if cursor.fetchone() == None:
+    conn = psycopg2.connect(conn_string(event, db_name))
+    conn.autocommit = True
+    cursor = conn.cursor()
+
+    main_cursor.execute(f"SELECT 1 FROM pg_user WHERE usename = %s", [username])
+    if main_cursor.fetchone() == None:
         logger.info(f"User {username} not found - creating")
-        cursor.execute(f"CREATE USER {username} WITH ENCRYPTED PASSWORD %s", [password]);
+        main_cursor.execute(f"CREATE USER {username} WITH ENCRYPTED PASSWORD %s", [password]);
     else:
         logger.info(f"User {username} found - setting password")
-        cursor.execute(f"ALTER USER {username} ENCRYPTED PASSWORD %s", [password]);
+        main_cursor.execute(f"ALTER USER {username} ENCRYPTED PASSWORD %s", [password]);
 
     if u['read-only'] == "true":
         logger.info(f"Granting READ-ONLY privileges on {db_name} to {username}")
-        cursor.execute(f"GRANT CONNECT ON DATABASE {db_name} TO {username}")
+        main_cursor.execute(f"GRANT CONNECT ON DATABASE {db_name} TO {username}")
         cursor.execute(f"GRANT USAGE ON SCHEMA public TO {username}")
         cursor.execute(f"GRANT SELECT ON ALL TABLES IN SCHEMA public TO {username}")
         cursor.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO {username}")
     else:
         logger.info(f"Granting all privileges on {db_name} to {username}")
-        cursor.execute(f"GRANT ALL PRIVILEGES ON DATABASE {db_name} TO {username}")
+        main_cursor.execute(f"GRANT ALL PRIVILEGES ON DATABASE {db_name} TO {username}")
+        cursor.execute(f"GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO {username}")
+        cursor.execute(f"GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO {username}")
+        cursor.execute(f"GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO {username}")
 
-# For quick testing purposes:
-def d():
-    return {
-        "db_name": "test_created",
-        "db_user": "postgres",
-        "db_password": "password",
-        "db_host": "localhost",
-        "users" :
-        [
-            {
-                "username": "test_user",
-                "password": "test_password",
-                "read-only": "false"
-            },
-            {
-                "username": "rouser",
-                "password": "test_password",
-                "read-only": "true"
-            }
-        ]
-    }
+    cursor.close()
+    conn.close()
